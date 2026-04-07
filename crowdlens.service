@@ -1,0 +1,23 @@
+[Unit]
+Description=CrowdLens browser service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/crowdlens
+Environment=DISPLAY_NUM=99
+Environment=CDP_PORT=9222
+Environment=JS_OLD_SPACE_MB=64
+Environment=PROFILE_DIR=/home/ubuntu/.cache/crowdlens-browser-profile
+Environment=LOG_DIR=/home/ubuntu/.cache/crowdlens
+Environment=START_URL=about:blank
+ExecStart=/home/ubuntu/crowdlens/crowdlens_service.sh
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
