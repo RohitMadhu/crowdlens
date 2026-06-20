@@ -9,7 +9,10 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/crowdlens
 Environment=DISPLAY_NUM=99
 Environment=CDP_PORT=9222
-Environment=JS_OLD_SPACE_MB=64
+Environment=BROWSER_RUNTIME=obscura
+Environment=OBSCURA_BIN=obscura
+Environment=OBSCURA_STEALTH=1
+Environment=JS_OLD_SPACE_MB=128
 Environment=PROFILE_DIR=/home/ubuntu/.cache/crowdlens-browser-profile
 Environment=LOG_DIR=/home/ubuntu/.cache/crowdlens
 Environment=START_URL=about:blank

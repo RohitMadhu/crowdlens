@@ -1,11 +1,9 @@
 # CrowdLens Deployment
 
-This is the lean production-shaped setup that worked best on a small Ubuntu VM:
+This is the lean production-shaped setup:
 
-- persistent `thorium-browser`
-- one `Xvfb` display
+- persistent Obscura CDP server
 - CDP bound to `127.0.0.1:9222`
-- one reusable browser profile
 - raw CDP scraper client in `crowdlens.mjs`
 
 ## Install
@@ -14,15 +12,18 @@ On Ubuntu:
 
 ```bash
 sudo apt update
-sudo apt install -y xvfb nodejs
+sudo apt install -y nodejs
 node --version
 ```
 
-Install Thorium Browser using the project's Ubuntu instructions, then verify:
+Use Node `22.4.0+`. The raw-CDP client relies on Node's built-in `WebSocket`,
+so no npm install step is required.
+
+Install or build Obscura, then verify:
 
 ```bash
-which thorium-browser
-which Xvfb
+which obscura
+obscura --help
 ```
 
 ## Service Files
@@ -32,9 +33,6 @@ Copy these files into your server workspace:
 - `crowdlens_service.sh`
 - `crowdlens.service`
 - `crowdlens.mjs`
-
-Use Node `22.4.0+`. The raw-CDP client relies on Node's built-in `WebSocket`,
-so no npm install step is required for the working path.
 
 Make the launcher executable:
 
@@ -47,8 +45,10 @@ If it does not, update these fields in `crowdlens.service`:
 
 - `WorkingDirectory`
 - `ExecStart`
-- `PROFILE_DIR`
 - `LOG_DIR`
+
+If `obscura` is not on the service user's `PATH`, set `OBSCURA_BIN` in
+`crowdlens.service` to the full binary path.
 
 ## Enable The Service
 
@@ -63,6 +63,14 @@ Check that CDP is live:
 
 ```bash
 curl -s http://127.0.0.1:9222/json/version
+```
+
+Expected shape:
+
+```json
+{
+  "Browser": "Obscura/0.1.0"
+}
 ```
 
 ## Query The Running Browser
@@ -83,20 +91,23 @@ node /home/ubuntu/crowdlens/crowdlens.mjs \
   --url "https://www.google.com/maps/place/..."
 ```
 
-Run a query and follow the first place link when needed:
+Run a query:
 
 ```bash
 node /home/ubuntu/crowdlens/crowdlens.mjs \
   --cdp-url "http://127.0.0.1:9222" \
-  --query "Costco Wholesale Yangjae"
+  --query "Costco Brooklyn NY"
 ```
 
 ## Runtime Notes
 
-- The browser side is still the expensive part. Reusing one persistent instance
-  is the main runtime win.
-- The included launcher keeps the footprint conservative with low-end-device
-  mode, disabled background features, and a small V8 old-space limit.
-- If `64 MB` is unstable, raise `JS_OLD_SPACE_MB` in the service unit to `128`.
-- If Google serves limited view for automated navigation, use a direct place URL
-  or open the page manually and then run `--inspect-current-page`.
+- Obscura can expose a weak snapshot immediately after navigation and then
+  hydrate the useful Maps panel a few seconds later. The scraper first polls for
+  popular-times signals, then falls back to a post-detach resample if needed.
+- Tune that polling window with `--popular-times-wait-ms`; the default is
+  `15000`.
+- Fresh browser profiles can return Google's limited Maps view on the first
+  navigation. The scraper retries one limited-view navigation by default.
+- CloakBrowser remains available with `BROWSER_RUNTIME=cloak` if Obscura
+  regresses, but it is Chromium-class in memory and disk footprint.
+- Legacy Thorium remains available with `BROWSER_RUNTIME=thorium`.

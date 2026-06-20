@@ -72,10 +72,10 @@ function buildCrashHint(errorText) {
       '--skia-resource-cache-limit-mb=32',
     ],
     nextSteps: [
-      'Relaunch Thorium with a higher old-space limit like 128.',
+      'Relaunch Obscura with a higher old-space limit like 128.',
       'Remove --disable-gpu if the crash persists.',
       'Remove the Skia cache limit flags if needed.',
-      'If the page still crashes, try --inspect-current-page after manually opening the place in Thorium.',
+      'If the page still crashes, try --inspect-current-page after manually opening the place in your CDP browser.',
     ],
   };
 }
@@ -83,10 +83,14 @@ function buildCrashHint(errorText) {
 function parseArgs(argv) {
   const args = {
     mode: 'maps',
-    settleMs: 8000,
+    settleMs: 1000,
     timeoutMs: DEFAULT_TIMEOUT_MS,
     includeDumps: false,
     inspectCurrentPage: false,
+    keepExtraTabs: false,
+    limitedViewRetries: 1,
+    postDetachResample: true,
+    popularTimesWaitMs: 15000,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -107,6 +111,14 @@ function parseArgs(argv) {
       args.includeDumps = true;
     } else if (arg === '--inspect-current-page') {
       args.inspectCurrentPage = true;
+    } else if (arg === '--keep-extra-tabs') {
+      args.keepExtraTabs = true;
+    } else if (arg === '--limited-view-retries') {
+      args.limitedViewRetries = Number(argv[++index]);
+    } else if (arg === '--no-post-detach-resample') {
+      args.postDetachResample = false;
+    } else if (arg === '--popular-times-wait-ms') {
+      args.popularTimesWaitMs = Number(argv[++index]);
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
@@ -173,6 +185,15 @@ function classifySnapshot(snapshot) {
     return 'content_without_busy_text';
   }
   return 'empty';
+}
+
+function hasPopularTimesSignal(snapshot) {
+  return (
+    (snapshot.busyAriaLabels || []).some((value) => /% busy at|Popular times|Currently \d+% busy/i.test(value)) ||
+    (snapshot.busyPhrases || []).some((value) => /Popular times|Currently \d+% busy|Usually/i.test(value)) ||
+    (snapshot.popularTimes || []).some((day) => (day.hours || []).some((hour) => typeof hour.percentage === 'number')) ||
+    typeof snapshot.currentPopularity === 'number'
+  );
 }
 
 function summarizeHours(visibleText) {
@@ -658,13 +679,70 @@ async function maybeFollowFirstPlaceLink(cdp, sessionId, snapshot, timeoutMs, se
   return takeSnapshot(cdp, sessionId, false);
 }
 
+async function takeSettledSnapshot(cdp, sessionId, args, targetUrl) {
+  let snapshot = await takeSnapshot(cdp, sessionId, args.includeDumps);
+  if (targetUrl && !args.url) {
+    snapshot = await maybeFollowFirstPlaceLink(cdp, sessionId, snapshot, args.timeoutMs, args.settleMs);
+    if (args.includeDumps) {
+      snapshot = await takeSnapshot(cdp, sessionId, true);
+    }
+  }
+  return snapshot;
+}
+
+async function waitForPopularTimesSnapshot(cdp, sessionId, timeoutMs, includeDumps, initialSnapshot = null) {
+  const deadline = Date.now() + timeoutMs;
+  let snapshot = initialSnapshot;
+
+  while (Date.now() < deadline) {
+    if (!snapshot) {
+      snapshot = await takeSnapshot(cdp, sessionId, false);
+    }
+    if (hasPopularTimesSignal(snapshot)) {
+      break;
+    }
+    if (snapshot.classification === 'captcha' || snapshot.classification === 'limited_view') {
+      break;
+    }
+    await sleep(1000);
+    snapshot = null;
+  }
+
+  if (!snapshot) {
+    snapshot = await takeSnapshot(cdp, sessionId, false);
+  }
+
+  if (includeDumps) {
+    const dumpSnapshot = await takeSnapshot(cdp, sessionId, true);
+    return {
+      ...snapshot,
+      visibleText: dumpSnapshot.visibleText,
+      ariaLabels: dumpSnapshot.ariaLabels,
+      headings: dumpSnapshot.headings,
+      html: dumpSnapshot.html,
+    };
+  }
+
+  return snapshot;
+}
+
+function isWeakNavigationSnapshot(snapshot) {
+  return (
+    snapshot.classification === 'content_without_busy_text' &&
+    !snapshot.title &&
+    !snapshot.address &&
+    !snapshot.website &&
+    !snapshot.phone
+  );
+}
+
 async function getPageTargets(cdp) {
   const { targetInfos = [] } = await cdp.send('Target.getTargets');
   return targetInfos.filter(
     (target) =>
       target.type === 'page' &&
       !target.url.startsWith('devtools://') &&
-      !target.url.startsWith('chrome://')
+      (!target.url.startsWith('chrome://') || target.url.startsWith('chrome://newtab'))
   );
 }
 
@@ -679,6 +757,21 @@ function chooseTarget(pageTargets, inspectCurrentPage) {
     reversed[0] ||
     null
   );
+}
+
+async function closeExtraPageTargets(cdp, pageTargets, keepTargetId) {
+  for (const target of pageTargets) {
+    if (target.targetId === keepTargetId) {
+      continue;
+    }
+
+    try {
+      await cdp.send('Target.closeTarget', { targetId: target.targetId });
+    } catch (error) {
+      // Some runtimes may reject closeTarget for already-closing startup pages.
+      // Keeping the scrape moving is better than failing because cleanup raced.
+    }
+  }
 }
 
 async function openBrowserSession(args) {
@@ -702,6 +795,10 @@ async function openBrowserSession(args) {
     };
   }
 
+  if (!args.keepExtraTabs) {
+    await closeExtraPageTargets(cdp, pageTargets, target.targetId);
+  }
+
   const { sessionId } = await cdp.send('Target.attachToTarget', {
     targetId: target.targetId,
     flatten: true,
@@ -713,6 +810,7 @@ async function openBrowserSession(args) {
   return {
     cdp,
     sessionId,
+    targetId: target.targetId,
     close: async () => {
       try {
         await cdp.send('Target.detachFromTarget', { sessionId });
@@ -720,6 +818,14 @@ async function openBrowserSession(args) {
         // Browser shutdowns and page crashes can invalidate the session before
         // we detach. The CDP socket close below is the important cleanup step.
       } finally {
+        if (!args.inspectCurrentPage) {
+          try {
+            await cdp.send('Target.closeTarget', { targetId: target.targetId });
+          } catch (error) {
+            // Some runtimes may already have closed the target. Detaching and
+            // closing the CDP socket is still enough to keep the scrape moving.
+          }
+        }
         await cdp.close();
       }
     },
@@ -732,7 +838,7 @@ async function main() {
     ? null
     : args.url || (args.mode === 'search' ? buildSearchUrl(args.query) : buildMapsUrl(args.query));
 
-  const session = await openBrowserSession(args);
+  let session = await openBrowserSession(args);
   let navigationError = null;
 
   try {
@@ -748,12 +854,45 @@ async function main() {
       await sleep(args.settleMs);
     }
 
-    let snapshot = await takeSnapshot(cdp, sessionId, args.includeDumps);
-    if (targetUrl && !args.url) {
-      snapshot = await maybeFollowFirstPlaceLink(cdp, sessionId, snapshot, args.timeoutMs, args.settleMs);
-      if (args.includeDumps) {
-        snapshot = await takeSnapshot(cdp, sessionId, true);
+    let snapshot = await takeSettledSnapshot(cdp, sessionId, args, targetUrl);
+    let retryCount = 0;
+    while (
+      targetUrl &&
+      !args.inspectCurrentPage &&
+      snapshot.classification === 'limited_view' &&
+      retryCount < args.limitedViewRetries
+    ) {
+      retryCount += 1;
+      try {
+        const retryNavigationError = await navigateAndWait(cdp, sessionId, targetUrl, args.timeoutMs, args.settleMs);
+        if (retryNavigationError) {
+          navigationError = retryNavigationError;
+        }
+        snapshot = await takeSettledSnapshot(cdp, sessionId, args, targetUrl);
+      } catch (error) {
+        navigationError = String(error);
+        break;
       }
+    }
+
+    if (retryCount > 0) {
+      snapshot.retryCount = retryCount;
+    }
+
+    if (targetUrl && !hasPopularTimesSignal(snapshot) && snapshot.classification !== 'limited_view') {
+      const waitMs = Math.max(0, Math.min(args.popularTimesWaitMs, args.timeoutMs));
+      if (waitMs > 0) {
+        snapshot = await waitForPopularTimesSnapshot(cdp, sessionId, waitMs, args.includeDumps, snapshot);
+      }
+    }
+
+    if (targetUrl && args.postDetachResample && isWeakNavigationSnapshot(snapshot)) {
+      await session.close();
+      session = null;
+      await sleep(Math.max(1000, Math.min(args.settleMs, 3000)));
+      session = await openBrowserSession({ ...args, inspectCurrentPage: true });
+      snapshot = await takeSettledSnapshot(session.cdp, session.sessionId, args, null);
+      snapshot.postDetachResample = true;
     }
 
     if (navigationError) {
@@ -762,7 +901,9 @@ async function main() {
 
     console.log(JSON.stringify(snapshot, null, 2));
   } finally {
-    await session.close();
+    if (session) {
+      await session.close();
+    }
   }
 }
 
