@@ -48,20 +48,33 @@ const WEEKDAY_NAMES_SUNDAY_FIRST = [
 ];
 
 const DEFAULT_TIMEOUT_MS = 30000;
-const HEAVY_RESOURCE_BLOCKLIST = [
+const SAFE_HEAVY_RESOURCE_BLOCKLIST = [
   '*://*.google.com/maps/vt/*',
   '*://*.google.com/maps/photometa/*',
   '*://*.google.com/maps/preview/photo*',
   '*://*.googleusercontent.com/*',
-  '*://*.ggpht.com/*',
-  '*://streetviewpixels-pa.googleapis.com/*',
-  '*://*.googleapis.com/*/photos/*',
   '*://*.gstatic.com/tactile/basepage/*.gif',
   '*://*.google.com/images/branding/mapslogo/*',
   '*://*.google.com/images/branding/product/ico/*',
   '*://*.gstatic.com/*.woff',
   '*://*.gstatic.com/*.woff2',
 ];
+const AGGRESSIVE_HEAVY_RESOURCE_BLOCKLIST = [
+  ...SAFE_HEAVY_RESOURCE_BLOCKLIST,
+  '*://*.ggpht.com/*',
+  '*://streetviewpixels-pa.googleapis.com/*',
+  '*://*.googleapis.com/*/photos/*',
+];
+
+function heavyResourceBlocklist(profile) {
+  if (!profile || profile === 'safe') {
+    return SAFE_HEAVY_RESOURCE_BLOCKLIST;
+  }
+  if (profile === 'aggressive') {
+    return AGGRESSIVE_HEAVY_RESOURCE_BLOCKLIST;
+  }
+  throw new Error(`Unknown heavy resource block profile: ${profile}`);
+}
 
 function buildMapsUrl(query) {
   return `https://www.google.com/maps/search/${encodeURIComponent(query)}?hl=en`;
@@ -135,7 +148,11 @@ function parseArgs(argv) {
     } else if (arg === '--popular-times-wait-ms') {
       args.popularTimesWaitMs = Number(argv[++index]);
     } else if (arg === '--block-heavy-resources') {
-      args.blockedUrls.push(...HEAVY_RESOURCE_BLOCKLIST);
+      const maybeProfile = argv[index + 1];
+      const profile = maybeProfile && !maybeProfile.startsWith('--') ? argv[++index] : 'safe';
+      args.blockedUrls.push(...heavyResourceBlocklist(profile));
+    } else if (arg === '--block-heavy-resource-profile') {
+      args.blockedUrls.push(...heavyResourceBlocklist(argv[++index]));
     } else if (arg === '--blocked-url') {
       args.blockedUrls.push(argv[++index]);
     } else {
