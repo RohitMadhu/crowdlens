@@ -48,6 +48,17 @@ const WEEKDAY_NAMES_SUNDAY_FIRST = [
 ];
 
 const DEFAULT_TIMEOUT_MS = 30000;
+const HEAVY_RESOURCE_BLOCKLIST = [
+  '*://*.google.com/maps/vt/*',
+  '*://*.google.com/maps/photometa/*',
+  '*://*.google.com/maps/preview/photo*',
+  '*://*.googleusercontent.com/*',
+  '*://*.gstatic.com/tactile/basepage/*.gif',
+  '*://*.google.com/images/branding/mapslogo/*',
+  '*://*.google.com/images/branding/product/ico/*',
+  '*://*.gstatic.com/*.woff',
+  '*://*.gstatic.com/*.woff2',
+];
 
 function buildMapsUrl(query) {
   return `https://www.google.com/maps/search/${encodeURIComponent(query)}?hl=en`;
@@ -91,6 +102,7 @@ function parseArgs(argv) {
     limitedViewRetries: 1,
     postDetachResample: true,
     popularTimesWaitMs: 15000,
+    blockedUrls: [],
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -119,6 +131,10 @@ function parseArgs(argv) {
       args.postDetachResample = false;
     } else if (arg === '--popular-times-wait-ms') {
       args.popularTimesWaitMs = Number(argv[++index]);
+    } else if (arg === '--block-heavy-resources') {
+      args.blockedUrls.push(...HEAVY_RESOURCE_BLOCKLIST);
+    } else if (arg === '--blocked-url') {
+      args.blockedUrls.push(argv[++index]);
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
@@ -806,6 +822,10 @@ async function openBrowserSession(args) {
 
   await cdp.send('Page.enable', {}, sessionId);
   await cdp.send('Runtime.enable', {}, sessionId);
+  if (args.blockedUrls.length > 0) {
+    await cdp.send('Network.enable', {}, sessionId);
+    await cdp.send('Network.setBlockedURLs', { urls: args.blockedUrls }, sessionId);
+  }
 
   return {
     cdp,
